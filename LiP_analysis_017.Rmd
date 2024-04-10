@@ -1,0 +1,417 @@
+---
+title: "mduennebacke_017"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+date: "2024-01-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Preperation
+
+## Loading packages 
+
+```{r loading_packages, message=FALSE, warning=FALSE}
+
+library(protti)
+library(tidyverse)
+library(data.table)
+library(dplyr)
+library(magrittr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(gridExtra)
+
+
+```
+
+## Loading data
+
+
+```{r loading_data, message=FALSE, warning=FALSE}
+
+setwd("/Volumes/biol_bc_picotti_1/Maximilian_D/017_ß-lactamase_Re")
+
+DIA_raw <- read_protti("20240224_120316_mduennebacke_Report_small_library.csv")
+```
+## filter data
+
+```{r cleaning_data, message = FALSE, warning = FALSE}
+
+
+DIA_raw$intensity_log2 <- log2(DIA_raw$fg_quantity)
+
+
+DIA_raw_norm <- normalise(DIA_raw,
+  sample = r_file_name,
+  intensity_log2 = intensity_log2,
+  method = "median"
+)
+
+qc_median_intensities(
+  DIA_raw_norm,
+  r_file_name,
+  pep_grouping_key,
+  normalised_intensity_log2,
+  plot = TRUE,
+  interactive = FALSE
+)
+
+DIA_clean <- DIA_raw_norm %>%
+  filter(eg_qvalue <= 1e-5) %>%
+  #filter(pg_fasta_files != "contaminants", pg_fasta_files != "NaN") %>%
+  filter(fg_quantity > 10) %>%
+  #mutate(intensity_log2 = log2(fg_quantity)) %>%
+  filter(pep_is_proteotypic == T)# %>%
+  #mutate(uniprot_id = pg_protein_accessions)
+
+qc_median_intensities(
+  DIA_clean,
+  r_file_name,
+  pep_grouping_key,
+  normalised_intensity_log2,
+  plot = TRUE,
+  interactive = FALSE
+)
+
+
+
+
+unis <- unique(DIA_clean$pg_protein_accessions) # make vector for fetch_uniprot
+```
+## Load data from uniprot and join with DIA dataframe
+
+```{r uniprot, message = FALSE, warning = FALSE}
+
+uniprot <- # download protein information from UniProt
+  fetch_uniprot(
+    unis,
+    columns =  c(
+      "protein_name",
+      "gene_names",
+      "length",
+      "sequence",
+      "xref_pdb"
+    )
+  ) #%>%
+  # rename(
+  #   protein_sequence = sequence,
+  #   length_protein = length,
+  #   uniprot_id = accession
+  # )
+
+DIA_clean_uniprot <- DIA_clean %>%
+  left_join(uniprot, by = c("pg_protein_accessions" = "accession")) %>% # rejoin with annotations
+  find_peptide(sequence, pep_stripped_sequence) %>%
+  assign_peptide_type(aa_before, last_aa, aa_after) %>%
+  # sequence_coverage(sequence, pep_stripped_sequence) %>%
+  distinct()
+
+DIA_clean_uniprot$condrep <- paste(DIA_clean_uniprot$r_condition, DIA_clean_uniprot$r_replicate, sep = "_")
+
+proteins_identified <- uniprot %>%
+  distinct(accession)
+
+# fwrite(proteins_identified, file = "identified_proteins_CaM_LiP.csv", sep = ",")
+
+
+```
+
+#Data analysis
+
+
+## Volcano plots precurser lvl
+
+
+```{r Volcano_plot, message = FALSE, warning = FALSE}
+
+
+
+
+Volcano_input <- DIA_clean_uniprot %>%
+  unique() %>%
+  assign_missingness(r_file_name,
+                     r_condition,
+                     fg_id,
+                     normalised_intensity_log2,
+                     ref_condition = "0_mM",
+                     retain_columns = c(pg_protein_accessions, pep_grouping_key, start, end, pep_type, sequence, length))
+
+
+t_test_result_proDA_pep <- calculate_diff_abundance(data = Volcano_input,
+                                r_file_name,
+                                r_condition,
+                                fg_id,
+                                normalised_intensity_log2,
+                                missingness,
+                                comparison = comparison,
+                                ref_condition = "0_mM",
+                                method = "moderated_t-test",
+                                retain_columns = c(pg_protein_accessions, pep_grouping_key, start, end, pep_type, sequence, length))
+
+
+
+
+
+condition_vulcano <- c("1_mM_vs_0_mM")
+t_test_result_proDA_pep_comp <- t_test_result_proDA_pep[t_test_result_proDA_pep$comparison %in% condition_vulcano, ]
+
+
+volcano_plot(t_test_result_proDA_pep_comp, fg_id, diff, pval, method = "target", target_column = pg_protein_accessions, target = c("P62593") ,  x_axis_label = "log2(fold change) ", title = "Volcano plot precursor level", y_axis_label = "-log10(p-value)", log2FC_cutoff = 1, significance_cutoff = 0.01, interactive = T)
+
+
+#volcano_plot(t_test_result_proDA_pep_comp, pep_grouping_key, diff, adj_pval, method = "target", target_column = pg_protein_accessions, target = c("P24941") ,  x_axis_label = "log2(fold change)", title = "Volcano plot precursor level", y_axis_label = "-log10(q-value)", log2FC_cutoff = 1, significance_cutoff = 0.05, interactive = T)
+
+
+
+```
+## fragment traces
+
+```{r traces, fig.align = "center", message = FALSE, warning = FALSE}
+
+# Function to plot based on input sequence
+plot_sequence <- function(df, sequence_value) {
+  # Filter the dataframe based on the input sequence
+  subset_df <- df[df$pep_grouping_key == sequence_value, ]
+  
+  # Create the plot
+  plot <- ggplot(subset_df, aes(x = condrep, y = normalised_intensity_log2, group = 1)) +
+    geom_point() +  # Use points for each value
+    geom_line() +   # Add lines connecting the points
+    labs(title = paste("Intensity Plot for", sequence_value),
+         x = "condrep",
+         y = "Normalized Intensity (log2)") +
+    theme_minimal()
+  
+  return(plot)
+}
+
+
+plot_sequence(DIA_clean_uniprot, "_KDIGPNKR_.2")
+
+
+# 
+# # Function to plot all sequences for a specific protein accession
+# plot_sequences_for_protein <- function(df, protein_accession) {
+#   # Filter the dataframe based on the input protein accession
+#   subset_df <- df[df$pg_protein_accessions == protein_accession, ]
+#   
+#   # Create the plot
+#   plot <- ggplot(subset_df, aes(x = condrep, y = normalised_intensity_log2, group = pep_grouping_key, color = pep_grouping_key)) +
+#     geom_point() +  # Use points for each value
+#     geom_line() +   # Add lines connecting the points
+#     labs(title = paste("Intensity Plot for Protein Accession:", protein_accession),
+#          x = "condrep",
+#          y = "Normalized Intensity (log2)") +
+#     theme_minimal() +
+#     scale_color_discrete()  # Adjust line and point colors
+#   
+#   return(plot)
+# }
+# 
+# 
+# 
+# plot_sequences_for_protein(DIA_clean_uniprot, "P54652")
+
+```
+
+
+
+## Woods plot
+
+```{r woods, fig.align = "center", message = FALSE, warning = FALSE}
+
+t_test_result_proDA_pep_comp %>%
+  filter(pg_protein_accessions == "P62593") %>%
+  mutate(significant = ifelse(pval < 0.01, TRUE, FALSE)) %>%
+  drop_na() %>%
+  woods_plot(diff,
+             start,
+             end,
+             length,
+             protein_id = pg_protein_accessions,
+             highlight = significant,
+             #colouring = pep_type,
+             colouring = adj_pval,
+             fold_change_cutoff = 1)
+
+```
+## digestion of POI
+
+```{r POI_digest, fig.align = "center", message = FALSE, warning = FALSE}
+
+specific_accession <- "P62593"
+
+# Filter the DataFrame for the specific protein accession
+filtered_df <- subset(DIA_clean_uniprot, pg_protein_accessions == specific_accession)
+
+# Create a bar plot of the counts of entries in the pep_digest_type_trypsin_p column
+plot <- ggplot(filtered_df, aes(x = pep_digest_type_trypsin_p)) +
+  geom_bar() +
+  labs(title = "Digestion Type Counts for Specific Protein Accession",
+       x = "Digestion Type",
+       y = "Count")
+
+# Show the plot
+print(plot)
+
+
+```
+##Barcode plot
+
+```{r Barcode, message = FALSE, warning = FALSE}
+
+t_test_result_proDA_pep_comp %>%
+  filter(pg_protein_accessions == "P62593") %>%
+  barcode_plot(start,
+               end,
+               length,
+               cutoffs = c(diff = 1, pval = 0.01)
+               )
+
+
+
+
+
+
+
+
+```
+
+#QC
+
+#CV
+
+```{r quality_control_cvs, fig.width = 12, fig.align= "center",  message = FALSE, warning = FALSE}
+
+qc_cvs(
+  data = DIA_clean_uniprot,
+  grouping = pep_grouping_key,
+  condition = r_condition,
+  intensity = fg_quantity,
+  plot = FALSE
+)
+
+qc_cvs(
+  data = DIA_clean_uniprot,
+  grouping = pep_grouping_key,
+  condition = r_condition,
+  intensity = fg_quantity,
+  plot_style = "density",
+  plot = TRUE
+)
+
+qc_cvs(
+  data = DIA_clean_uniprot,
+  grouping = pep_grouping_key,
+  condition = r_condition,
+  intensity = fg_quantity,
+  plot_style = "violin",
+  plot = TRUE
+)
+
+```
+
+### Intensity distribution
+
+Intensity distributions are plotted for the whole dataset.
+
+```{r quality_control_log2_int_distr, fig.align= "center", message = FALSE, warning = FALSE}
+
+
+qc_intensity_distribution(
+  DIA_clean_uniprot,
+  condrep,
+  pep_grouping_key,
+  intensity_log2,
+  plot_style = "histogram"
+)
+
+```
+
+### Missed cleavages
+
+
+```{r quality_control_missed_cleav, fig.align= "center", message = FALSE, warning = FALSE}
+qc_missed_cleavages(
+  DIA_clean_uniprot,
+  condrep,
+  pep_grouping_key,
+  pep_nr_of_missed_cleavages,
+  fg_quantity,
+  method = "intensity",
+  plot = TRUE,
+  interactive = FALSE
+)
+
+qc_missed_cleavages(
+  DIA_clean_uniprot,
+  condrep,
+  pep_grouping_key,
+  pep_nr_of_missed_cleavages,
+  fg_quantity,
+  method = "count",
+  plot = TRUE,
+  interactive = FALSE
+)
+```
+
+### Peptide types
+
+Peptide type (tryptic, semi-tryptic, non-tryptic) distributions are even throughout the different samples.
+
+```{r quality_control_pep_type, fig.align = "center", message = FALSE, warning = FALSE}
+
+qc_peptide_type(
+  DIA_clean_uniprot,
+  condrep,
+  pep_grouping_key,
+  pep_type,
+  intensity = fg_quantity,
+  method = "count",
+  plot = TRUE,
+  interactive = FALSE
+)
+
+qc_peptide_type(
+  DIA_clean_uniprot,
+  condrep,
+  pep_grouping_key,
+  pep_type,
+  intensity = fg_quantity,
+  method = "intensity",
+  plot = TRUE,
+  interactive = FALSE
+)
+
+```
+
+### Number of peptide IDs per sample
+
+The numbers of identified peptides are consistent throughout the different samples.
+
+```{r quality_control_pep_ID, fig.align = "center", message = FALSE, warning = FALSE}
+
+DIA_raw$condrep <- paste(DIA_raw$r_condition, DIA_raw$r_replicate, sep = "_")
+
+
+qc_ids(DIA_raw, condrep, pep_grouping_key, condition = r_condition, intensity = fg_quantity)
+
+```
+
+### Principal component analysis (PCA)
+
+```{r PCA, message = FALSE, warning = FALSE}
+
+DIA_clean_uniprot %>%
+qc_pca(condrep, 
+       pep_grouping_key, 
+       intensity_log2, 
+       r_condition)
+
+```
+
